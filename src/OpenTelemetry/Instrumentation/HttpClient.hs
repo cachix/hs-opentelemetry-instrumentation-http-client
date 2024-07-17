@@ -69,7 +69,7 @@ traceResponse t resp = do
   ctxt <- getContext
   ctxt' <- extract (getTracerProviderPropagators $ getTracerTracerProvider t) (HTTP.responseHeaders resp) ctxt
   _ <- attachContext ctxt'
-  forM_ (Context.lookupSpan ctxt) $ \s -> do
+  forM_ (Context.lookupSpan ctxt') $ \s -> do
     when (HTTP.statusCode (HTTP.responseStatus resp) >= 400) $ do
       setStatus s (Error "")
     addAttributes s $

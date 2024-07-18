@@ -29,7 +29,10 @@ addTracerToManagerSettings' tp settings = do
   let tracer = makeTracer tp "hs-opentelemetry-instrumentation-http-client" tracerOptions
 
   settings
-    { HTTP.managerModifyRequest = traceRequest tracer >=> HTTP.managerModifyRequest settings,
+    { -- NOTE: do not use `managerModifyRequest`.
+      -- It may be called multiple times per request.
+      -- See https://hackage.haskell.org/package/http-client-0.7.17/docs/Network-HTTP-Client.html#v:managerModifyRequest
+      HTTP.managerWrapException = \req e -> traceRequest tracer req >> HTTP.managerWrapException settings req e,
       HTTP.managerModifyResponse = HTTP.managerModifyResponse settings >=> traceResponse tracer
     }
 

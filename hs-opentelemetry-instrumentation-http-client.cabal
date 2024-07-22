@@ -42,3 +42,19 @@ test-suite hs-opentelemetry-instrumentation-http-client-test
     build-depends:
         base ^>=4.18.2.1,
         hs-opentelemetry-instrumentation-http-client
+
+benchmark stress-test
+  ghc-options:         -O2 -Wall -threaded -fprof-auto -rtsopts "-with-rtsopts=-N"
+  main-is:             StressTest.hs
+  type:                exitcode-stdio-1.0
+  hs-source-dirs:      bench
+  default-language:    Haskell2010
+  build-depends:       base
+                     , hs-opentelemetry-instrumentation-http-client
+                     , hs-opentelemetry-sdk
+                     , http-client
+                     , http-types
+                     , random
+                     , wai
+                     , warp
+                     , unliftio

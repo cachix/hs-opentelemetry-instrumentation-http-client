@@ -10,3 +10,4 @@ devenv.local.nix
 
 # Haskell
 dist-newstyle/
+.stack-work/

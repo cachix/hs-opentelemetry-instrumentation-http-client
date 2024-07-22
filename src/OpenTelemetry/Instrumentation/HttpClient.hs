@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module OpenTelemetry.Instrumentation.HttpClient
   ( addTracerToManagerSettings,
@@ -6,8 +7,10 @@ module OpenTelemetry.Instrumentation.HttpClient
   )
 where
 
+import Control.Concurrent.Thread.Storage (ThreadStorageMap)
+import qualified Control.Concurrent.Thread.Storage as TS
 import Control.Monad (forM_, when, (>=>))
-import Control.Monad.IO.Class (MonadIO)
+import Control.Monad.IO.Class (MonadIO, liftIO)
 import qualified Data.ByteString.Char8 as B
 import qualified Data.HashMap.Strict as H
 import qualified Data.Text as T
@@ -18,6 +21,14 @@ import qualified OpenTelemetry.Context as Context
 import OpenTelemetry.Context.ThreadLocal as Context
 import OpenTelemetry.Propagator (extract, inject)
 import OpenTelemetry.Trace.Core
+import System.IO.Unsafe (unsafePerformIO)
+
+-- | Store the current parent span, if available. Used for cleanup.
+type ThreadLocalSpans = ThreadStorageMap (Maybe Span)
+
+threadLocalSpans :: ThreadLocalSpans
+threadLocalSpans = unsafePerformIO TS.newThreadStorageMap
+{-# NOINLINE threadLocalSpans #-}
 
 addTracerToManagerSettings :: (MonadIO m) => HTTP.ManagerSettings -> m HTTP.ManagerSettings
 addTracerToManagerSettings settings = do
@@ -32,12 +43,14 @@ addTracerToManagerSettings' tp settings = do
     { -- NOTE: do not use `managerModifyRequest`.
       -- It may be called multiple times per request.
       -- See https://hackage.haskell.org/package/http-client-0.7.17/docs/Network-HTTP-Client.html#v:managerModifyRequest
-      HTTP.managerWrapException = \req e -> traceRequest tracer req >> HTTP.managerWrapException settings req e,
+      HTTP.managerWrapException = \req e -> do
+        (req', e') <- traceRequest tracer req e
+        HTTP.managerWrapException settings req' e',
       HTTP.managerModifyResponse = HTTP.managerModifyResponse settings >=> traceResponse tracer
     }
 
-traceRequest :: (MonadIO m) => Tracer -> HTTP.Request -> m HTTP.Request
-traceRequest t req = do
+traceRequest :: (MonadIO m) => Tracer -> HTTP.Request -> IO a -> m (HTTP.Request, IO a)
+traceRequest t req onExceptionHandler = do
   let url =
         T.decodeUtf8
           ((if HTTP.secure req then "https://" else "http://") <> HTTP.host req <> ":" <> B.pack (show $ HTTP.port req) <> HTTP.path req <> HTTP.queryString req)
@@ -64,14 +77,19 @@ traceRequest t req = do
   s <- createSpan t ctxt "http.request" args
   updateName s url
   Context.adjustContext (Context.insertSpan s)
+  _ <- TS.attach threadLocalSpans (Context.lookupSpan ctxt)
+
   hdrs <- inject (getTracerProviderPropagators $ getTracerTracerProvider t) ctxt (HTTP.requestHeaders req)
-  pure $ req {HTTP.requestHeaders = hdrs}
+  let req' = req {HTTP.requestHeaders = hdrs}
+  pure (req', onExceptionHandler')
+  where
+    onExceptionHandler' = cleanupThreadLocalSpan >> onExceptionHandler
 
 traceResponse :: (MonadIO m) => Tracer -> HTTP.Response a -> m (HTTP.Response a)
 traceResponse t resp = do
   ctxt <- getContext
   ctxt' <- extract (getTracerProviderPropagators $ getTracerTracerProvider t) (HTTP.responseHeaders resp) ctxt
-  _ <- attachContext ctxt'
+  _ <- attachContext ctxt' -- TODO: is this necessary?
   forM_ (Context.lookupSpan ctxt') $ \s -> do
     when (HTTP.statusCode (HTTP.responseStatus resp) >= 400) $ do
       setStatus s (Error "")
@@ -80,4 +98,16 @@ traceResponse t resp = do
         [ ("http.status_code", toAttribute $ HTTP.statusCode $ HTTP.responseStatus resp)
         ]
     endSpan s Nothing
+
+  cleanupThreadLocalSpan
+
   pure resp
+
+{-# INLINE cleanupThreadLocalSpan #-}
+cleanupThreadLocalSpan :: forall m. (MonadIO m) => m ()
+cleanupThreadLocalSpan =
+  TS.detach threadLocalSpans >>= mapM_ cleanupSpan'
+  where
+    cleanupSpan' :: Maybe Span -> m ()
+    cleanupSpan' parent = Context.adjustContext $ \ctx ->
+      maybe (Context.removeSpan ctx) (`Context.insertSpan` ctx) parent

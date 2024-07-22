@@ -10,12 +10,11 @@ where
 import Control.Concurrent.Thread.Storage (ThreadStorageMap)
 import qualified Control.Concurrent.Thread.Storage as TS
 import Control.Monad (forM_, when, (>=>))
-import Control.Monad.IO.Class (MonadIO, liftIO)
+import Control.Monad.IO.Class (MonadIO)
 import qualified Data.ByteString.Char8 as B
 import qualified Data.HashMap.Strict as H
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
-import GHC.IO.Exception (IOException)
 import qualified Network.HTTP.Client as HTTP
 import qualified Network.HTTP.Types as HTTP
 import qualified OpenTelemetry.Context as Context

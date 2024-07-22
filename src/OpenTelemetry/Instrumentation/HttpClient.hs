@@ -15,6 +15,7 @@ import qualified Data.ByteString.Char8 as B
 import qualified Data.HashMap.Strict as H
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
+import GHC.IO.Exception (IOException)
 import qualified Network.HTTP.Client as HTTP
 import qualified Network.HTTP.Types as HTTP
 import qualified OpenTelemetry.Context as Context
@@ -22,9 +23,10 @@ import OpenTelemetry.Context.ThreadLocal as Context
 import OpenTelemetry.Propagator (extract, inject)
 import OpenTelemetry.Trace.Core
 import System.IO.Unsafe (unsafePerformIO)
+import UnliftIO.Exception (SomeException, displayException, withException)
 
 -- | Store the current parent span, if available. Used for cleanup.
-type ThreadLocalSpans = ThreadStorageMap (Maybe Span)
+type ThreadLocalSpans = ThreadStorageMap (Maybe Span, Span)
 
 threadLocalSpans :: ThreadLocalSpans
 threadLocalSpans = unsafePerformIO TS.newThreadStorageMap
@@ -77,21 +79,32 @@ traceRequest t req onExceptionHandler = do
   s <- createSpan t ctxt "http.request" args
   updateName s url
   Context.adjustContext (Context.insertSpan s)
-  _ <- TS.attach threadLocalSpans (Context.lookupSpan ctxt)
+  _ <- TS.attach threadLocalSpans (Context.lookupSpan ctxt, s)
 
   hdrs <- inject (getTracerProviderPropagators $ getTracerTracerProvider t) ctxt (HTTP.requestHeaders req)
   let req' = req {HTTP.requestHeaders = hdrs}
   pure (req', onExceptionHandler')
   where
-    onExceptionHandler' = cleanupThreadLocalSpan >> onExceptionHandler
+    onExceptionHandler' =
+      onExceptionHandler `withException` handleResponseException
+
+    handleResponseException :: SomeException -> IO ()
+    handleResponseException e = do
+      mspans <- TS.lookup threadLocalSpans
+      forM_ mspans $ \(_parent, s) -> do
+        setStatus s $ Error $ T.pack $ displayException e
+        recordException s mempty Nothing e
+        endSpan s Nothing
+
+      cleanupThreadLocalSpan
 
 traceResponse :: (MonadIO m) => Tracer -> HTTP.Response a -> m (HTTP.Response a)
 traceResponse t resp = do
   ctxt <- getContext
   ctxt' <- extract (getTracerProviderPropagators $ getTracerTracerProvider t) (HTTP.responseHeaders resp) ctxt
-  _ <- attachContext ctxt' -- TODO: is this necessary?
-  forM_ (Context.lookupSpan ctxt') $ \s -> do
-    when (HTTP.statusCode (HTTP.responseStatus resp) >= 400) $ do
+  mspans <- TS.lookup threadLocalSpans
+  forM_ mspans $ \(_parent, s) -> do
+    when (HTTP.statusCode (HTTP.responseStatus resp) >= 400) $
       setStatus s (Error "")
     addAttributes s $
       H.fromList
@@ -108,6 +121,6 @@ cleanupThreadLocalSpan :: forall m. (MonadIO m) => m ()
 cleanupThreadLocalSpan =
   TS.detach threadLocalSpans >>= mapM_ cleanupSpan'
   where
-    cleanupSpan' :: Maybe Span -> m ()
-    cleanupSpan' parent = Context.adjustContext $ \ctx ->
+    cleanupSpan' :: (Maybe Span, Span) -> m ()
+    cleanupSpan' (parent, _s) = Context.adjustContext $ \ctx ->
       maybe (Context.removeSpan ctx) (`Context.insertSpan` ctx) parent

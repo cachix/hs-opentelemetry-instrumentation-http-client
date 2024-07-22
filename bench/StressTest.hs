@@ -2,25 +2,39 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
 import Control.Concurrent (forkIO, threadDelay)
+import Control.Monad (void)
+import Control.Monad.IO.Class (MonadIO)
 import qualified Data.ByteString.Lazy as Lazy
 import qualified Network.HTTP.Client as HTTP
 import Network.HTTP.Types (status200, status404)
 import qualified Network.Wai as Wai
 import qualified Network.Wai.Handler.Warp as Warp
+import OpenTelemetry.Context.ThreadLocal (attachContext, getContext)
 import OpenTelemetry.Instrumentation.HttpClient (addTracerToManagerSettings)
-import OpenTelemetry.Trace (TracerProvider, initializeGlobalTracerProvider, shutdownTracerProvider)
+import OpenTelemetry.Trace
+  ( TracerProvider,
+    defaultSpanArguments,
+    inSpan,
+    initializeGlobalTracerProvider,
+    makeTracer,
+    shutdownTracerProvider,
+    tracerOptions,
+  )
 import qualified System.Random.Stateful as Random
+import UnliftIO (MonadUnliftIO)
 import UnliftIO.Async (pooledMapConcurrentlyN_)
 import UnliftIO.Exception (bracket, try)
 
 numRequests :: Int
 numRequests = 100000
 
-numThreads :: Int
-numThreads = 100
+maxParallelRequests :: Int
+maxParallelRequests = 100
 
 main :: IO ()
-main = withTracer $ \_ -> do
+main = withTracer $ \tracerProvider -> do
+  let tracer = makeTracer tracerProvider "stress-test" tracerOptions
+
   rng <- Random.newIOGenM (Random.mkStdGen 42)
   _ <- forkIO $ Warp.run 4567 (app rng)
 
@@ -30,14 +44,11 @@ main = withTracer $ \_ -> do
   -- Wait for the server to start
   threadDelay 100000
 
-  pooledMapConcurrentlyN_ numThreads (client manager) [1 .. numRequests]
+  inSpan tracer "pooledMapConcurrentlyN" defaultSpanArguments $
+    tracedPooledMapConcurrentlyN_ maxParallelRequests (void . client manager) [1 .. numRequests]
 
   -- Let GC do its thing
   threadDelay (1 * 1000 * 1000)
-
-withTracer :: (TracerProvider -> IO a) -> IO a
-withTracer =
-  bracket initializeGlobalTracerProvider shutdownTracerProvider
 
 app :: Random.IOGenM Random.StdGen -> Wai.Application
 app rng _ respond = do
@@ -50,7 +61,16 @@ app rng _ respond = do
 req :: HTTP.Request
 req = HTTP.parseRequest_ "http://localhost:4567"
 
-client :: HTTP.Manager -> Int -> IO ()
-client manager _ = do
-  _response :: Either HTTP.HttpException (HTTP.Response Lazy.ByteString) <- try $ HTTP.httpLbs req manager
-  return ()
+client :: HTTP.Manager -> Int -> IO (Either HTTP.HttpException (HTTP.Response Lazy.ByteString))
+client manager _ =
+  try $ HTTP.httpLbs req manager
+
+withTracer :: (TracerProvider -> IO a) -> IO a
+withTracer =
+  bracket initializeGlobalTracerProvider shutdownTracerProvider
+
+tracedPooledMapConcurrentlyN_ :: (MonadIO m, MonadUnliftIO m, Traversable t) => Int -> (a -> m ()) -> t a -> m ()
+tracedPooledMapConcurrentlyN_ numThreads action xs = do
+  ctxt <- getContext
+  let wrappedAction x = attachContext ctxt >> action x
+  pooledMapConcurrentlyN_ numThreads wrappedAction xs

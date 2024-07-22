@@ -102,6 +102,7 @@ traceResponse :: (MonadIO m) => Tracer -> HTTP.Response a -> m (HTTP.Response a)
 traceResponse t resp = do
   ctxt <- getContext
   ctxt' <- extract (getTracerProviderPropagators $ getTracerTracerProvider t) (HTTP.responseHeaders resp) ctxt
+  _ <- attachContext ctxt'
   mspans <- TS.lookup threadLocalSpans
   forM_ mspans $ \(_parent, s) -> do
     when (HTTP.statusCode (HTTP.responseStatus resp) >= 400) $

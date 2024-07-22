@@ -11,3 +11,8 @@ devenv.local.nix
 # Haskell
 dist-newstyle/
 .stack-work/
+
+# Profiling Haskell
+*.eventlog
+*.prof
+*.hp

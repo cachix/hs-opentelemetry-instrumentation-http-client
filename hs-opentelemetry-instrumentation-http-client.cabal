@@ -23,7 +23,7 @@ library
     -- other-extensions:
     build-depends:    base ^>=4.18
                     , bytestring
-                    , hs-opentelemetry-api ==0.1.*
+                    , hs-opentelemetry-api ==0.2.*
                     , http-client
                     , http-types
                     , text
